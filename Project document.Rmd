@@ -1,0 +1,401 @@
+---
+title: "BST 270 - Reproducible Data Science - Project document"
+author: "Abhijith Asok"
+date: "17 October 2017"
+output: html_document
+---
+
+##Data Pre-processing
+
+###Data Load
+
+First, we read the data in from the system. By default, the missing values in the entire dataset are represented by the "?" symbol. However, to make it easier for R to detect and handle them, they are converted to NAs. The following code does this operation.
+
+```{r dataread}
+diabdata <- read.csv("/Users/abhijithasok/Documents/Harvard Health Data Science/Fall 2017/Reproducible Data Science/Project/Project stuff/diabetic_data.csv", stringsAsFactors = T, header = T, na.strings = c("?","NA"))
+```
+
+###Original Data Preservation
+
+In order to preserve the original data so that we could return back to it at a later time for reference if need be, we load it into another variable and use that hereafter, leaving **diabdata** untouched.
+
+```{r datatransfer}
+diabwork <- diabdata
+```
+
+We now start the data pre-processing. 
+
+###Missing Values - Column drop
+
+There are 3 variables in the data with a high number of missing values - namely, "weight", "payer_code" and "medical_specialty". These can be seen as a percentage of the total number of original rows as follows:
+
+```{r missingcount}
+round((colSums(is.na(diabwork))/nrow(diabwork))*100, digits = 2)
+```
+
+We can see here that weight, payer_code and medical_specialty have 96.86%, 39.56% and 49.08% of them as missing values respectively. Since even imputing these values would result in large inaccuracies, we take those variables out of consideration.
+
+```{r missingremoval}
+diabwork <- diabwork[,!(names(diabwork) %in% c("weight","payer_code","medical_specialty"))]
+```
+
+###Missing Values - Row Drop
+
+As we saw in the listing, there are a few other variables with a very low percentage of missing values. Since we have considerable data size, we could just omit those rows that contain missing values in any of the remaining variables.
+
+```{r naomission}
+diabwork <- na.omit(diabwork)
+```
+
+###Dependent Variable Re-classification
+
+Our planned dependent variable "readmitted" now contains three levels:
+
+1. "<30"" - Patient readmitted with similar diagnosis within 30 days of leaving the hospital
+2. ">30"" - Patient readmitted with similar diagnosis after 30 days of leaving the hospital
+3. "NO"" - Patient not readmitted with similar diagnosis again
+
+For simplicity of modelling, we can combine the first two levels into a single level called "YES", to symbolize the patient being readmitted with a similar diagnosis, irrespective of the timeline. We create a new variable called "readmitted_final" for this purpose and remove the original "readmitted" variable.
+
+```{r response_change}
+diabwork$readmitted_final[diabwork$readmitted %in% c("<30",">30")] <- "YES"
+diabwork$readmitted_final[diabwork$readmitted == "NO"] <- "NO"
+diabwork <- diabwork[,!names(diabwork) == "readmitted"]
+```
+
+###Assigning the right datatypes
+
+A deeper look into the dataset reveals that the dataset consists of integer and factor variables only.
+
+```{r orig_datatypes}
+str(diabwork)
+```
+
+However, some variables that are originally meant to be factor(since they are ID variables or equivalent) have been wrongly categorized as integer or character. These are:
+
+1. encounter_id
+2. patient_nbr
+3. admission_type_id
+4. discharge_disposition_id
+5. admission_source_id
+6. readmitted_final
+
+We convert these into factors and check the conversion to confirm.
+
+```{r factor_conversion}
+diabwork[,c(1,2,6,7,8,47)] <- lapply(diabwork[,c(1,2,6,7,8,47)],factor)
+str(diabwork)
+```
+
+###Dataset sampling
+
+Since the dataset is too large and would take time to run, we make a subset of the entire dataset to work with. We can pick out 2000 rows from the dataset through a random sample. However, we go for stratified random sampling based on the dependent "readmitted_final" variable to ensure equal representation of both levels of the variable. We use the "sample_n" function from the 'dplyr' package for this.
+
+```{r strat_sample}
+library(dplyr)
+set.seed(123)
+diaboverall <- diabwork %>% group_by(readmitted_final) %>% sample_n(1000)
+```
+
+###Omitting uninformative variables
+
+Since 'examide' and 'citoglipton' are both factors with just 1 level, they are of no use to us. Hence, we remove them.
+
+```{r factor_removal}
+diaboverall <- diaboverall %>% select(-examide,-citoglipton)
+```
+
+###Train-Test Split
+
+Now we split it into train and test datasets based on a direct 70 - 30 split for convenience.
+
+```{r train_test}
+indices <- sample(1:nrow(diaboverall), size=0.7*nrow(diaboverall))
+diabtrain <- diaboverall[indices,]
+diabtest <- diaboverall[-indices,]
+```
+
+###Reassigning the dependent variable
+
+Let's convert the "readmitted_final" column into 0 and 1.
+
+```{r var_remodel}
+diabtrain$readmitted_final_model <- ""
+diabtest$readmitted_final_model <- ""
+diabtrain$readmitted_final_model[diabtrain$readmitted_final == "YES"] <- 1
+diabtrain$readmitted_final_model[diabtrain$readmitted_final == "NO"] <- 0
+diabtrain$readmitted_final_model <- as.factor(diabtrain$readmitted_final_model)
+diabtest$readmitted_final_model[diabtest$readmitted_final == "YES"] <- 1
+diabtest$readmitted_final_model[diabtest$readmitted_final == "NO"] <- 0
+diabtest$readmitted_final_model <- as.factor(diabtest$readmitted_final_model)
+diabtrain$readmitted_final <- NULL
+diabtest$readmitted_final <- NULL
+```
+
+These are the final datasets that we would be using. We'll keep the test set aside for now and move to some basic exploratory data analysis on the training set.
+
+##Exploratory Data Analysis
+
+###Integer - Factor separation
+
+For this, we first separate out the integer and the factor variables so that we can look at both differently.
+
+```{r var_split}
+ints <- sapply(diabtrain, is.integer)
+diabtrain_int <- diabtrain[,ints] 
+diabtrain_factor <- diabtrain[,!ints]
+```
+
+###Scatterplot Matrix
+
+Let's create a scatter plot matrix of the integer variables and analyze correlations between them. We'll use the 'ggpairs' command in the 'GGally' package for this.
+
+```{r scattermatrix}
+library(GGally)
+ggpairs(diabtrain_int)
+```
+We can see that there is no correlation that can be considered to be high.
+
+###Correlation Plot
+
+To visualize the correlation better, let's make a correlation plot
+
+```{r corrplot}
+library(corrplot)
+corrplot(cor(diabtrain_int), method = "pie")
+```
+
+The plot makes the lack of high correlation evident. Therefore, we ignore any variable elimination for now.
+
+###Race, Gender, Age distribution
+
+Let's look at the distribution of the people who were admitted across their race, gender and age bracket, in the data
+
+```{r categ_division}
+diabtrain %>% group_by(race) %>% summarise(no_rows = length(race))
+diabtrain %>% group_by(gender) %>% summarise(no_rows = length(gender))
+diabtrain %>% group_by(age) %>% summarise(no_rows = length(age))
+```
+
+Let's visualize these using 'ggplot' for better understanding.
+
+```{r categ_viz}
+library(ggplot2)
+diabtrain %>% ggplot(aes(x=race, fill=race)) + geom_bar() + ggtitle("Distribution according to race in the dataset")
+diabtrain %>% ggplot(aes(x=gender, fill=gender)) + geom_bar() + ggtitle("Distribution according to gender in the dataset")
+diabtrain %>% ggplot(aes(x=age, fill=age)) + geom_bar() + ggtitle("Distribution according to age bracket in the dataset")
+```
+
+**Although the gender distribution is approximately balanced, there is a huge imbalance in the race of people admitted for diabetes. The Caucasian race has way more admitted patients for diabetes than any other race. The age bracket distribution is also skewed and resembles a left-skewed normal distribution with the mean around the (70-80) age bracket.**
+
+###Time spent in hospital across race, gender, age
+
+Let's look at the time spent in hospital distributed over race, gender and age. 
+
+```{r time}
+diabtrain %>% ggplot(aes(x=race, y=time_in_hospital,fill=race)) + geom_boxplot() + ggtitle("Distribution of time spent in hospital according to age bracket in the dataset")
+diabtrain %>% ggplot(aes(x=gender, y=time_in_hospital,fill=gender)) + geom_boxplot() + ggtitle("Distribution of time spent in hospital according to Sex in the dataset")
+diabtrain %>% ggplot(aes(x=age, y=time_in_hospital,fill=age)) + geom_boxplot() + ggtitle("Distribution of time spent in hospital according to Age bracket in the dataset")
+```
+
+**The time spent in the hospital is approximately uniform across races, although the Asian race tends to spend slightly more time than the other races. The distribution with regard to gender is very similar(it should have been called 'sex' and not gender, since binary definitions of gender are just not acceptable anymore. But, since the dataset consists of data that is more than a decade old, that's probably forgivable), although the median of males is higher than the females, suggesting that roughly, males tend to spend more time in the hospital than females. The distribution of the time in hospital with regard to age bracket is more or less linear, with higher age-brackets tending to spend more time in the hospital.**
+
+##Modelling
+
+###Tree Modelling
+
+```{r tree}
+library(rpart)
+set.seed(123)
+model_tree <- rpart(readmitted_final_model~., data = subset(diabtrain, select = -c(diag_1,diag_2,diag_3,encounter_id,patient_nbr)))
+predict_tree <- data.frame(predict(model_tree,newdata = diabtest[,-45],type = "class"))
+Prec_tree <- data.frame("Expected" = diabtest$readmitted_final_model, "Observed" = predict_tree[,1])
+Prec_tree$Equal <- as.numeric("")
+Prec_tree$Equal[Prec_tree$Expected == Prec_tree$Observed] <- 1
+Prec_tree$Equal[Prec_tree$Expected != Prec_tree$Observed] <- 0
+Accuracy <- (length(Prec_tree$Equal[Prec_tree$Equal == 1])/nrow(diabtest))*100
+Accuracy
+```
+
+This is a fairly accurate prediction for a dataset that is well-balanced. Let's visualise this tree
+
+```{r tree_viz}
+library(rpart.plot)
+rpart.plot(model_tree)
+```
+
+We see from the tree that the variables in most use are `number_inpatient, discharge_disposition_id, admission_source_id,time_in_hospital`.
+
+Let's look at the variable importance in this tree in further detail.
+
+```{r var_imp}
+model_tree$variable.importance
+```
+
+These 14 variables seem to be what the tree used and seem to be the set of most important variables.
+
+Let's make this more accurate using Random Forests.
+
+###Random Forest
+
+First, we make a random forest using all variables excluding ID variables and the diags(since they are factor variables with too many levels as compared to the dataset size which make them difficult to handle.) This is our base model.
+
+```{r forest}
+library(randomForest)
+set.seed(123)
+
+model_forest <- randomForest(readmitted_final_model~., data = subset(diabtrain, select =  -c(diag_1,diag_2,diag_3,encounter_id,patient_nbr)), ntree = 100, replace = TRUE)
+
+predict_forest <- data.frame(predict(model_forest,newdata = diabtest[,-45],type = "class"))
+
+Prec_forest <- data.frame("Expected" = diabtest$readmitted_final_model, "Observed" = predict_forest[,1])
+
+Prec_forest$Equal <- as.numeric("")
+Prec_forest$Equal[Prec_forest$Expected == Prec_forest$Observed] <- 1
+Prec_forest$Equal[Prec_forest$Expected != Prec_forest$Observed] <- 0
+
+Accuracy <- (length(Prec_forest$Equal[Prec_forest$Equal == 1])/nrow(diabtest))*100
+paste("Prediction accuracy:",round(Accuracy,digits = 2),"%")
+
+#Metrics
+predict_forest <- data.frame(predictions = predict(model_forest,newdata = diabtest[,-45],type = "prob"))
+
+predict_forest$pred <- ifelse(predict_forest$predictions.0 > predict_forest$predictions.1, predict_forest$predictions.0,predict_forest$predictions.1)
+
+brier_score <- mean((as.numeric(predict_forest$pred) - as.numeric(Prec_forest$Expected)))^2
+paste("Brier Score:",round(brier_score,digits = 4))
+
+library(pROC)
+roc_pred <- roc(Prec_forest$Expected,predict_forest$pred)
+roc_pred$auc
+```
+
+Our accuracy is just over 63%. However, our Brier Score is really undesirable at 0.76 with an unimpressive AUC
+
+Now we use just the 4 variables that were depicted in the tree visualisation. 
+
+```{r forest1}
+library(randomForest)
+set.seed(123)
+
+model_forest <- randomForest(readmitted_final_model~., data = subset(diabtrain, select = c(number_inpatient,discharge_disposition_id,admission_source_id,time_in_hospital,readmitted_final_model)), ntree = 100, replace = TRUE)
+
+predict_forest <- data.frame(predict(model_forest,newdata = diabtest[,-45],type = "class"))
+
+Prec_forest <- data.frame("Expected" = diabtest$readmitted_final_model, "Observed" = predict_forest[,1])
+
+Prec_forest$Equal <- as.numeric("")
+Prec_forest$Equal[Prec_forest$Expected == Prec_forest$Observed] <- 1
+Prec_forest$Equal[Prec_forest$Expected != Prec_forest$Observed] <- 0
+
+Accuracy <- (length(Prec_forest$Equal[Prec_forest$Equal == 1])/nrow(diabtest))*100
+paste("Prediction accuracy:",round(Accuracy,digits = 2),"%")
+
+#Metrics
+predict_forest <- data.frame(predictions = predict(model_forest,newdata = diabtest[,-45],type = "prob"))
+
+predict_forest$pred <- ifelse(predict_forest$predictions.0 > predict_forest$predictions.1, predict_forest$predictions.0,predict_forest$predictions.1)
+
+brier_score <- mean((as.numeric(predict_forest$pred) - as.numeric(Prec_forest$Expected)))^2
+paste("Brier Score:",round(brier_score,digits = 4))
+
+library(pROC)
+roc_pred <- roc(Prec_forest$Expected,predict_forest$pred)
+roc_pred$auc
+```
+
+This gives us almost 59% accuracy. Adding almost 40 more variables hence give us just 4% more accuracy for a very high computational cost. This model also witnesses a sharp drop in Brier Score at 0.48, which, although not a desirable value, is much better than the base model. The AUC here is higher than the base model as well.
+
+Now, let's create a random forest with the 14 variables that were used in the tree.
+
+```{r forest2}
+library(randomForest)
+set.seed(123)
+
+model_forest <- randomForest(readmitted_final_model~., data = subset(diabtrain, select = c(discharge_disposition_id,number_inpatient,time_in_hospital,admission_source_id,admission_type_id,num_lab_procedures,number_emergency,num_medications,number_diagnoses,num_procedures,age,number_outpatient,insulin,max_glu_serum,readmitted_final_model), ntree = 100, replace = TRUE))
+
+predict_forest <- data.frame(predict(model_forest,newdata = diabtest[,-45],type = "class"))
+
+Prec_forest <- data.frame("Expected" = diabtest$readmitted_final_model, "Observed" = predict_forest[,1])
+
+Prec_forest$Equal <- as.numeric("")
+Prec_forest$Equal[Prec_forest$Expected == Prec_forest$Observed] <- 1
+Prec_forest$Equal[Prec_forest$Expected != Prec_forest$Observed] <- 0
+
+Accuracy <- (length(Prec_forest$Equal[Prec_forest$Equal == 1])/nrow(diabtest))*100
+paste("Prediction accuracy:",round(Accuracy,digits = 2),"%")
+
+#Metrics
+predict_forest <- data.frame(predictions = predict(model_forest,newdata = diabtest[,-45],type = "prob"))
+
+predict_forest$pred <- ifelse(predict_forest$predictions.0 > predict_forest$predictions.1, predict_forest$predictions.0,predict_forest$predictions.1)
+
+brier_score <- mean((as.numeric(predict_forest$pred) - as.numeric(Prec_forest$Expected)))^2
+paste("Brier Score:",round(brier_score,digits = 4))
+
+library(pROC)
+roc_pred <- roc(Prec_forest$Expected,predict_forest$pred)
+roc_pred$auc
+```
+
+Addition of 10 variables jumped us up 1%. But, our Brier score is back high and the AUC is back to what it was in the base model.
+
+The better model of choice here would be the simple model with 4 variables.
+
+As a comparison, let's model this data using Support Vector Machines to see how they fair against tree-based models.
+
+###SVM
+
+```{r svm}
+library(e1071)
+set.seed(123)
+
+model_svm <- svm(readmitted_final_model~., data = subset(diabtrain, select = -c(diag_1,diag_2,diag_3,encounter_id,patient_nbr)))
+
+predict_svm <- data.frame(predict(model_svm,newdata = diabtest[,-45],type = "class"))
+
+Prec_svm <- data.frame("Expected" = diabtest$readmitted_final_model, "Observed" = predict_svm[,1])
+
+Prec_svm$Equal <- as.numeric("")
+Prec_svm$Equal[Prec_svm$Expected == Prec_svm$Observed] <- 1
+Prec_svm$Equal[Prec_svm$Expected != Prec_svm$Observed] <- 0
+
+Accuracy <- (length(Prec_svm$Equal[Prec_svm$Equal == 1])/nrow(diabtest))*100
+Accuracy
+```
+
+Our accuracy is 61.5%. Now we use just the 4 variables that were depicted in the tree visualisation. 
+
+```{r svm1}
+library(e1071)
+set.seed(123)
+model_svm <- svm(readmitted_final_model~., data = subset(diabtrain, select = c(number_inpatient,discharge_disposition_id,admission_source_id,time_in_hospital,readmitted_final_model)))
+predict_svm <- data.frame(predict(model_svm,newdata = diabtest[,-45],type = "class"))
+Prec_svm <- data.frame("Expected" = diabtest$readmitted_final_model, "Observed" = predict_svm[,1])
+Prec_svm$Equal <- as.numeric("")
+Prec_svm$Equal[Prec_svm$Expected == Prec_svm$Observed] <- 1
+Prec_svm$Equal[Prec_svm$Expected != Prec_svm$Observed] <- 0
+Accuracy <- (length(Prec_svm$Equal[Prec_svm$Equal == 1])/nrow(diabtest))*100
+Accuracy
+```
+
+This gives us almost 58% accuracy. Adding almost 40 more variables hence give us just 3.5% more accuracy for a very high computational cost.
+
+Now, let's create an svm with the 14 variables that were used in the tree.
+
+```{r svm2}
+library(e1071)
+set.seed(123)
+model_svm <- svm(readmitted_final_model~., data = subset(diabtrain, select = c(discharge_disposition_id,number_inpatient,time_in_hospital,admission_source_id,admission_type_id,num_lab_procedures,number_emergency,num_medications,number_diagnoses,num_procedures,age,number_outpatient,insulin,max_glu_serum,readmitted_final_model), ntree = 100, replace = TRUE))
+predict_svm <- data.frame(predict(model_svm,newdata = diabtest[,-45],type = "class"))
+Prec_svm <- data.frame("Expected" = diabtest$readmitted_final_model, "Observed" = predict_svm[,1])
+Prec_svm$Equal <- as.numeric("")
+Prec_svm$Equal[Prec_svm$Expected == Prec_svm$Observed] <- 1
+Prec_svm$Equal[Prec_svm$Expected != Prec_svm$Observed] <- 0
+Accuracy <- (length(Prec_svm$Equal[Prec_svm$Equal == 1])/nrow(diabtest))*100
+Accuracy
+```
+
+We see that in this case, a simpler model achieves marginally higher accuracy than the model involving almost all the variables.
+
+
